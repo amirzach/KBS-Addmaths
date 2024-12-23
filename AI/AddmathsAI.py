@@ -1,25 +1,19 @@
 import mysql.connector
-import openai
 from dotenv import load_dotenv
 import os
 import re
-from fuzzywuzzy import fuzz, process  # Adding fuzzy matching
+from fuzzywuzzy import process  # Adding fuzzy matching
+from transformers import pipeline  # Hugging Face transformer model
 
 # Load environment variables from .env file
 load_dotenv("C:/Users/User/AddmathsAI/AddmathsESKey.env")
-
-# Retrieve the API key
-openai.api_key = os.getenv("AddmathsESKey")
-
-# Verify the API key is loaded (optional, for testing)
-print("API Key loaded:", openai.api_key)
 
 # Connect to MySQL database
 def connect_to_db():
     return mysql.connector.connect(
             host="localhost",
-            user="username",
-            password="password",  
+            user="root",
+            password="",  # No password
             database="addmaths_es"
     )
 
@@ -59,14 +53,13 @@ def get_questions_for_topic(topic_id):
     query = "SELECT QuestionID, Description FROM questions WHERE TopicID = %s"
     return fetch_from_db(query, (topic_id,))
 
-# Generate AI response
+# Initialize Hugging Face model pipeline (For text generation, e.g., GPT-2)
+generator = pipeline("text-generation", model="gpt2")
+
+# Generate AI response (using Hugging Face instead of OpenAI)
 def generate_ai_response(prompt):
-    response = openai.Completion.create(
-        engine="text-davinci-003",
-        prompt=prompt,
-        max_tokens=150
-    )
-    return response['choices'][0]['text'].strip()
+    response = generator(prompt, max_length=150, num_return_sequences=1)
+    return response[0]['generated_text'].strip()
 
 # Normalize the user input (remove extra spaces and convert to lowercase)
 def normalize_input(user_input):
@@ -136,7 +129,7 @@ def expert_system():
                         for step in steps:
                             print(f"  - {step['Description']}")
 
-            # AI-powered explanation
+            # AI-powered explanation using Hugging Face
             explanation_prompt = f"Explain the topic '{topic_name}' in simple terms."
             explanation = generate_ai_response(explanation_prompt)
             print("\nAI Explanation:")
