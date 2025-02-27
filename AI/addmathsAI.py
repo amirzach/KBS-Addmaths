@@ -45,6 +45,16 @@ def get_all_topics():
     query = "SELECT TopicID, TopicName FROM topic"
     return fetch_from_db(query)
 
+@functools.lru_cache(maxsize=128)
+def get_all_questions():
+    query = """
+    SELECT q.QuestionID, q.Description, t.TopicName 
+    FROM questions q
+    JOIN topic t ON q.TopicID = t.TopicID
+    ORDER BY t.TopicName, q.QuestionID
+    """
+    return fetch_from_db(query)
+
 @functools.lru_cache(maxsize=32)
 def get_topic_details(topic_name):
     query = "SELECT * FROM topic WHERE TopicName = %s"
@@ -88,54 +98,181 @@ def fuzzy_match_topic(user_query, topics_dict):
     
     for topic_id, topic_name in topics_dict.items():
         score = fuzz.token_sort_ratio(user_query, topic_name)
-        if score > highest_score and score > 60:  # Set a threshold
+        if score > highest_score and score > 50:  # Reduced threshold for more flexibility
             highest_score = score
             best_match = topic_name
     
     return (best_match, highest_score) if best_match else None
 
+# Extract question ID from input
+def extract_question_id(query_text):
+    # Multiple patterns to match different ways of specifying a question
+    patterns = [
+        r'question\s+(\d+)',  # question 5
+        r'q\s*(\d+)',         # q5 or q 5
+        r'#\s*(\d+)',         # #5 or # 5
+        r'number\s+(\d+)',    # number 5
+        r'(\d+)',             # Just try to find any number as a fallback
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, query_text)
+        if match:
+            return int(match.group(1))
+    return None
+
+# Determine intent from user query
+def determine_intent(user_query):
+    query = user_query.lower()
+    
+    # Intent for listing all questions
+    if any(phrase in query for phrase in ['all questions', 'every question', 'list all questions', 'show all questions', 
+                                          'all problems', 'every problem', 'all exercises']):
+        return "list_all_questions"
+    
+    # Intent for listing topics
+    if any(keyword in query for keyword in ['list topic', 'show topic', 'all topic', 'what topic', 'available topic']):
+        return "list_topics"
+    
+    # Intent for showing steps for a question
+    if any(keyword in query for keyword in ['step', 'solution', 'solve', 'how to']) and extract_question_id(query):
+        return "show_steps"
+    
+    # Intent for listing questions for a topic
+    list_questions_patterns = [
+        r'(list|show|get|what|give)\s+.*(questions|problems|exercises).*(?:for|on|about|in)\s+(.+)',
+        r'questions\s+(?:for|on|about|in)\s+(.+)',
+        r'problems\s+(?:for|on|about|in)\s+(.+)'
+    ]
+    
+    for pattern in list_questions_patterns:
+        match = re.search(pattern, query)
+        if match:
+            # If the pattern has 3 groups, the topic is in the 3rd group
+            # If it has fewer, the topic is in the last group
+            topic_group = match.group(3) if len(match.groups()) >= 3 else match.group(len(match.groups()))
+            return "list_questions_for_topic", topic_group.strip()
+    
+    # Default intent is to show topic information
+    return "show_topic_info"
+
+# Extract topic from questions query
+def extract_topic_from_query(query, pattern_type="questions"):
+    if pattern_type == "questions":
+        patterns = [
+            r'(?:questions|problems)\s+(?:for|on|about|in)\s+(.+)',
+            r'(?:list|show|get)\s+(?:questions|problems).*(?:for|on|about|in)\s+(.+)',
+            r'what\s+(?:questions|problems).*(?:for|on|about|in)\s+(.+)'
+        ]
+    else:
+        patterns = [r'(.+)']  # Fallback pattern to capture anything
+    
+    for pattern in patterns:
+        match = re.search(pattern, query)
+        if match:
+            return match.group(1).strip()
+    
+    return query  # Return the original query if no pattern matches
+
+# Display help information
+def show_help():
+    print("\n" + "="*50)
+    print("ADDMATHS EXPERT SYSTEM - COMMAND GUIDE")
+    print("="*50)
+    print("You can use these commands or natural language queries:")
+    print("\n1. TOPIC INFORMATION:")
+    print("   - Just type a topic name (e.g., 'Fungsi', 'Janjang')")
+    print("   - You'll get formulas and sample questions for that topic")
+    
+    print("\n2. LIST COMMANDS:")
+    print("   - 'list topics' or 'show available topics'")
+    print("   - 'list questions for [topic]' (e.g., 'list questions for Fungsi')")
+    print("   - 'list all questions' or 'show all questions'")
+    
+    print("\n3. QUESTION SOLUTIONS:")
+    print("   - 'show steps for question 5' or 'solution for q5'")
+    print("   - 'how to solve question 12' or 'steps for #12'")
+    
+    print("\n4. OTHER COMMANDS:")
+    print("   - 'help' - Show this guide again")
+    print("   - 'exit' - Quit the program")
+    print("="*50)
+
 # Main expert system logic
 def expert_system():
     global questions_cache
     
-    print("Welcome to the AddMaths Expert System!")
-    print("Commands:")
-    print("- 'list topics' - Shows all available topics")
-    print("- 'list questions for [topic]' - Lists questions for a specific topic")
-    print("- 'show steps for question [ID]' - Shows steps for a specific question")
-    print("- '[topic name]' - Displays information about a topic")
-    print("- 'exit' - Quits the program")
+    print("\n" + "="*60)
+    print("     WELCOME TO THE ADDMATHS EXPERT SYSTEM!")
+    print("="*60)
+    print("This system helps with additional mathematics topics,")
+    print("formulas, and step-by-step solutions to problems.")
+    
+    # Show initial help
+    show_help()
     
     # Fetch all topics from the database once
     all_topics = get_all_topics()
     preprocess_topics(all_topics)
 
     while True:
-        user_query = input("\nEnter your query: ").strip().lower()
+        user_query = input("\nWhat would you like to know? ").strip()
         
-        if user_query == "exit":
+        if user_query.lower() == "exit":
             print("Goodbye!")
             break
+            
+        if user_query.lower() == "help":
+            show_help()
+            continue
         
         # Normalize and process user input
         normalized_query = normalize_input(user_query)
+        
+        # Determine the user's intent
+        intent_result = determine_intent(normalized_query)
+        
+        # Unpack the intent result
+        if isinstance(intent_result, tuple):
+            intent, *extra_args = intent_result
+        else:
+            intent = intent_result
+            extra_args = []
 
-        # Handle the list topics query
-        if "list" in normalized_query and "topics" in normalized_query:
+        # Handle different intents
+        if intent == "list_all_questions":
+            all_questions = get_all_questions()
+            
+            if all_questions:
+                current_topic = None
+                print("\nAll Available Questions:")
+                print("=======================")
+                
+                for question in all_questions:
+                    # Print topic header when topic changes
+                    if current_topic != question['TopicName']:
+                        current_topic = question['TopicName']
+                        print(f"\n[{current_topic}]")
+                    
+                    print(f"ID: {question['QuestionID']} - {question['Description']}")
+                
+                questions_cache = {q['QuestionID']: q for q in all_questions}
+                print("\nTo see steps for any question, ask 'show steps for question #'")
+            else:
+                print("No questions available in the database.")
+        
+        elif intent == "list_topics":
             topic_names = [topic['TopicName'] for topic in all_topics]
-            print("Available topics:")
+            print("\nAvailable Topics:")
+            print("----------------")
             for name in topic_names:
                 print(f"- {name}")
-            continue
-
-        # Handle show steps for a specific question
-        if ("show" in normalized_query or "get" in normalized_query) and "steps" in normalized_query and "question" in normalized_query:
-            # Extract question ID using regex
-            question_pattern = r"question\s+(\d+)"
-            match = re.search(question_pattern, normalized_query)
-            
-            if match:
-                question_id = int(match.group(1))
+            print("\nFor information on a topic, just type its name.")
+            print("To see questions for a topic, type 'list questions for [topic name]'")
+                
+        elif intent == "show_steps":
+            question_id = extract_question_id(normalized_query)
+            if question_id:
                 question = get_question_by_id(question_id)
                 
                 if question:
@@ -149,96 +286,105 @@ def expert_system():
                         print("No steps available for this question.")
                 else:
                     print(f"Question with ID {question_id} not found.")
-                continue
             else:
-                print("Please provide a valid question ID (e.g., 'show steps for question 5').")
-                continue
-
-        # Handle listing questions for a specific topic
-        if "list" in normalized_query and "questions" in normalized_query:
-            # Extract topic name from query
-            topic_pattern = r"questions\s+(?:for|on|about)\s+(.+)"
-            match = re.search(topic_pattern, normalized_query)
-            
-            if match:
-                topic_query = match.group(1).strip()
-                matched_topic = fuzzy_match_topic(topic_query, topics_cache)
+                print("I couldn't identify which question you're asking about. Please include a question number.")
                 
-                if matched_topic:
-                    # Find topic details
-                    original_topic_name = None
-                    for topic in all_topics:
-                        if topic['TopicName'].lower() == matched_topic[0]:
-                            original_topic_name = topic['TopicName']
-                            topic_id = topic['TopicID']
-                            break
-                            
-                    if original_topic_name:
-                        questions = get_questions_for_topic(topic_id)
-                        print(f"\nQuestions for {original_topic_name}:")
-                        
-                        # Save questions to cache for reference
-                        questions_cache = {q['QuestionID']: q for q in questions}
-                        
-                        if questions:
-                            for question in questions:
-                                print(f"ID: {question['QuestionID']} - {question['Description']}")
-                        else:
-                            print("No questions available for this topic.")
-                        continue
+        elif intent == "list_questions_for_topic":
+            topic_query = extra_args[0] if extra_args else extract_topic_from_query(normalized_query)
+            matched_topic = fuzzy_match_topic(topic_query, topics_cache)
             
-            print("Please specify a valid topic when listing questions.")
-            continue
-
-        # Fuzzy match using the preprocessed topics
-        matched_topic = fuzzy_match_topic(normalized_query, topics_cache)
-        if matched_topic:
-            # Find the original topic name from the matched lowercase name
-            original_topic_name = None
-            for topic in all_topics:
-                if topic['TopicName'].lower() == matched_topic[0]:
-                    original_topic_name = topic['TopicName']
-                    break
+            if matched_topic:
+                # Find topic details
+                original_topic_name = None
+                for topic in all_topics:
+                    if topic['TopicName'].lower() == matched_topic[0]:
+                        original_topic_name = topic['TopicName']
+                        topic_id = topic['TopicID']
+                        break
+                        
+                if original_topic_name:
+                    questions = get_questions_for_topic(topic_id)
+                    print(f"\nQuestions for {original_topic_name}:")
+                    print("-" * (len(f"Questions for {original_topic_name}:")))
                     
-            if not original_topic_name:
-                print("Sorry, I couldn't find information about that topic.")
-                continue
+                    # Save questions to cache for reference
+                    questions_cache = {q['QuestionID']: q for q in questions}
+                    
+                    if questions:
+                        for question in questions:
+                            print(f"ID: {question['QuestionID']} - {question['Description']}")
+                        print("\nTo see steps for a question, type 'show steps for question #'")
+                    else:
+                        print("No questions available for this topic.")
+                else:
+                    print(f"I couldn't find the topic '{topic_query}'. Please try another topic.")
+            else:
+                print(f"I couldn't find the topic '{topic_query}'. Please try another topic.")
                 
-            # Fetch detailed info on the matched topic
-            topic_details = get_topic_details(original_topic_name)
-            if not topic_details:
-                print("Sorry, I couldn't find information about that topic.")
-                continue
-
-            topic_id = topic_details['TopicID']
-            topic_name = topic_details['TopicName']
-
-            print(f"\nTopic: {topic_name}\n")
-
-            # Retrieve and display formulas
-            formulas = get_formulas_for_topic(topic_id)
-            if formulas:
-                print("Formulas:")
-                for formula in formulas:
-                    print(f"- {formula['FormulaContent']}")
-
-            # Retrieve and display questions
-            questions = get_questions_for_topic(topic_id)
+        elif intent == "show_topic_info":
+            # First try to match directly with the topics
+            matched_topic = fuzzy_match_topic(normalized_query, topics_cache)
             
-            # Save questions to cache for reference
-            questions_cache = {q['QuestionID']: q for q in questions}
+            if not matched_topic:
+                # If no direct match, try to extract potential topic mentions
+                words = re.findall(r'\b\w+\b', normalized_query)
+                for i in range(len(words)):
+                    for j in range(i + 1, min(i + 5, len(words) + 1)):  # Look at phrases up to 4 words long
+                        phrase = ' '.join(words[i:j])
+                        if len(phrase) > 2:  # Only consider phrases longer than 2 characters
+                            potential_match = fuzzy_match_topic(phrase, topics_cache)
+                            if potential_match and (not matched_topic or potential_match[1] > matched_topic[1]):
+                                matched_topic = potential_match
             
-            if questions:
-                print("\nSample Questions:")
-                for question in questions:
-                    print(f"ID: {question['QuestionID']} - {question['Description']}")
-                    # Fetch and display steps for each question
-                    steps = get_steps_for_question(question['QuestionID'])
-                    if steps:
-                        print(f"  (Use 'show steps for question {question['QuestionID']}' for detailed steps)")
+            if matched_topic:
+                # Find the original topic name from the matched lowercase name
+                original_topic_name = None
+                for topic in all_topics:
+                    if topic['TopicName'].lower() == matched_topic[0]:
+                        original_topic_name = topic['TopicName']
+                        break
+                        
+                if not original_topic_name:
+                    print("Sorry, I couldn't find information about that topic.")
+                    print("Try asking about a specific mathematics topic or type 'list topics' to see what's available.")
+                    continue
+                    
+                # Fetch detailed info on the matched topic
+                topic_details = get_topic_details(original_topic_name)
+                if not topic_details:
+                    print("Sorry, I couldn't find information about that topic.")
+                    continue
 
-        else:
-            print("Sorry, I couldn't find information about that topic.")
+                topic_id = topic_details['TopicID']
+                topic_name = topic_details['TopicName']
+
+                print(f"\nTopic: {topic_name}")
+                print("-" * (len(f"Topic: {topic_name}")))
+
+                # Retrieve and display formulas
+                formulas = get_formulas_for_topic(topic_id)
+                if formulas:
+                    print("\nFormulas:")
+                    for formula in formulas:
+                        print(f"- {formula['FormulaContent']}")
+
+                # Retrieve and display questions
+                questions = get_questions_for_topic(topic_id)
+                
+                # Save questions to cache for reference
+                questions_cache = {q['QuestionID']: q for q in questions}
+                
+                if questions:
+                    print("\nSample Questions:")
+                    for question in questions:
+                        print(f"ID: {question['QuestionID']} - {question['Description']}")
+                    print("\nTo see steps for a question, type 'show steps for question #'")
+                else:
+                    print("\nNo questions available for this topic.")
+
+            else:
+                print("I'm not sure what topic you're asking about.")
+                print("Type 'list topics' to see all available topics or 'help' for command assistance.")
 
 # Run the expert system
 if __name__ == "__main__":
